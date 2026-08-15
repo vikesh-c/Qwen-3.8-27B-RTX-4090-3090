@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "channel": "latest",
+  "tag": "b10430",
+  "releaseUrl": "https://github.com/ggml-org/llama.cpp/releases/tag/b10430",
+  "publishedAt": "2026-08-14T12:58:04Z",
+  "cudaVersion": "13.3",
+  "runtimeAsset": "llama-b10430-bin-win-cuda-13.3-x64.zip",
+  "runtimeAssetSha256": "3f6ba22be05a8216a0f39dd4964a4f5089f3826424e9389d54fa94c4bd0b2a97",
+  "cudaRuntimeAsset": "cudart-llama-bin-win-cuda-13.3-x64.zip",
+  "cudaRuntimeAssetSha256": "1462a050eb4c684921ba51dcc4cc488a036674c3e73e9945ee705b854808d03e",
+  "binaryRelativePath": "llama-server.exe",
+  "binarySha256": "582393c66bae52f815284b624b8394b9fc7b940e8f61c32fd3eacb3e80675346",
+  "generatedAt": "2026-08-14T17:00:00.0000000+00:00"
+}
