@@ -15,12 +15,12 @@
   "ubatch": 256,
   "runtimeRelativePath": "bin\\llama.cpp\\current\\llama-server.exe",
   "runtimeManifestRelativePath": "bin\\llama.cpp\\current\\runtime-manifest.json",
-  "modelRelativePath": "models\\qwen3.8-27b\\Qwen3.8-27B-Q4_K_M.gguf",
+  "modelRelativePath": "models\\qwen3.8-27b\\Qwen3.8-27B-UD-Q4_K_M.gguf",
   "mmprojRelativePath": "models\\qwen3.8-27b\\mmproj-F16.gguf",
   "logRelativePath": "logs\\qwen3.8-27b",
   "stateRelativePath": "state\\qwen3.8-27b",
   "modelId": "qwen3.8-27b",
-  "modelFile": "Qwen3.8-27B-Q4_K_M.gguf",
+  "modelFile": "Qwen3.8-27B-UD-Q4_K_M.gguf",
   "apiKeyFileEnv": "LLAMA_SERVER_API_KEY_FILE",
   "sampling": {
     "thinking": {
@@ -53,7 +53,7 @@
   "mtp": {
     "enabled": true,
     "type": "draft-mtp",
-    "draftNMax": 2,
+    "draftNMax": 4,
     "draftPMin": 0.0,
     "preferred": true
   },
@@ -70,10 +70,10 @@
     "rtx3090Status": "compatibility target; performance and headroom not yet measured"
   },
   "artifacts": {
-    "modelSha256": "7b2aec3b9ababdfd75aa17552ee95607d866e44decf547f6f12fcef85cc89f1b",
+    "modelSha256": "322e194ff79741c7baa497c240f677f54b201b0efab44ca8e50f122b39123482",
     "mmprojSha256": "cbb841a9ee0636b2ec172f5bb8df2ea8dfeb01e90fe7c6126581d662a0b4e43e",
     "chatTemplateSha256": "398edf5b5bb802fb6b9c9a8dba670d09f2aaeef6fdcaa0b2ca307265f59f78dc",
-    "artifactsNote": "The model, vision projector, and Froggeric v22 chat template are hash-pinned. The llama.cpp runtime floats: bootstrap installs the latest stable release, verifies its published digests, and records the exact build in runtime-manifest.json."
+    "artifactsNote": "The Unsloth Dynamic 3.0 model, vision projector, and Froggeric v22 chat template are hash-pinned. The llama.cpp runtime floats: bootstrap installs the latest stable release, verifies its published digests, and records the exact build in runtime-manifest.json."
   },
   "safety": {
     "launchRequiresLoopback": true,

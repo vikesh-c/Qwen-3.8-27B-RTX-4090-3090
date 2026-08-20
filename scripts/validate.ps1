@@ -24,7 +24,7 @@ if ($profile) {
     if ($profile.host -ne '127.0.0.1' -or $profile.parallel -ne 1) { Add-Error 'Profile must remain loopback-only and single-slot.' }
     if ($profile.context -ne 163840 -or $profile.maxContext -ne 163840) { Add-Error 'Profile context must remain exactly 163840.' }
     if ($profile.cacheK -ne 'q4_0' -or $profile.cacheV -ne 'q4_0') { Add-Error 'Profile K/V cache must remain q4_0.' }
-    if ($profile.mtp.enabled -ne $true -or $profile.mtp.type -ne 'draft-mtp' -or $profile.mtp.draftNMax -ne 2) { Add-Error 'Bundled MTP normal profile changed.' }
+    if ($profile.mtp.enabled -ne $true -or $profile.mtp.type -ne 'draft-mtp' -or $profile.mtp.draftNMax -ne 4) { Add-Error 'Bundled MTP normal profile changed.' }
     foreach ($name in @('runtimeRelativePath','runtimeManifestRelativePath','modelRelativePath','mmprojRelativePath','logRelativePath','stateRelativePath')) {
         $value = [string]$profile.$name
         if ([IO.Path]::IsPathRooted($value) -or $value -match '(^|[\\/])\.\.([\\/]|$)') { Add-Error "Profile path is not portable: $name" }

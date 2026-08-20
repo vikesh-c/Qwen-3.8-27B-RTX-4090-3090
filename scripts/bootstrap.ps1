@@ -1,6 +1,6 @@
 param(
     [string]$LocalRoot = $env:LOCAL_LLM_ROOT,
-    [string]$ModelUrl = 'https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/430473d9d0e975450ce1f445642b6527cb4faea1/Qwen3.8-27B-Q4_K_M.gguf?download=true',
+    [string]$ModelUrl = 'https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/27af057ecb382ddfea5d12837360a8980560e3ed/Qwen3.8-27B-UD-Q4_K_M.gguf?download=true',
     [string]$MmprojUrl = 'https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/430473d9d0e975450ce1f445642b6527cb4faea1/mmproj-F16.gguf?download=true',
     [string]$ChatTemplateUrl = 'https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates/resolve/9f14778c92c3b5ed3e0738085694c0d3452802dd/chat_template.jinja',
     [string]$LlamaReleaseApiUrl = 'https://api.github.com/repos/ggml-org/llama.cpp/releases/latest',
@@ -249,9 +249,9 @@ if (-not $SkipRuntime) {
 
 Assert-HuggingFaceAuth
 
-$modelPath = Join-Path $modelDirectory 'Qwen3.8-27B-Q4_K_M.gguf'
+$modelPath = Join-Path $modelDirectory 'Qwen3.8-27B-UD-Q4_K_M.gguf'
 $mmprojPath = Join-Path $modelDirectory 'mmproj-F16.gguf'
-Get-VerifiedDownload $ModelUrl $modelPath '7B2AEC3B9ABABDFD75AA17552EE95607D866E44DECF547F6F12FCEF85CC89F1B' 'Qwen3.8-27B-Q4_K_M MTP model'
+Get-VerifiedDownload $ModelUrl $modelPath '322E194FF79741C7BAA497C240F677F54B201B0EFAB44CA8E50F122B39123482' 'Qwen3.8-27B-UD-Q4_K_M Dynamic 3.0 model'
 Get-VerifiedDownload $MmprojUrl $mmprojPath 'CBB841A9EE0636B2EC172F5BB8DF2EA8DFEB01E90FE7C6126581D662A0B4E43E' 'Qwen3.8 F16 vision projector'
 
 # Froggeric v22 chat template: fixes official Qwen 3.8 template regressions

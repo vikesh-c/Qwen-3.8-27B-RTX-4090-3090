@@ -1,156 +1,145 @@
+# bench.ps1 -- combined prefill + decode ladder via llama-benchy.
+#
+#   .\benchmarks\bench.ps1                          # full 6-rung ladder, 3 runs
+#   .\benchmarks\bench.ps1 -Contexts 4096,65536    # subset of rungs
+#
+# This is the same engine-agnostic benchmark contract used by the companion
+# SGLang and oMLX recipes: unique prompts, --no-cache, three runs per rung,
+# and exactly 2,048 generated tokens. The server must already be running;
+# this runner never launches, restarts, or changes it.
+
+[CmdletBinding()]
 param(
-    [int[]]$Contexts = @(4096, 8192, 16384, 32768, 65536, 131072, 160000),
+    [int[]]$Contexts = @(4096, 8192, 16384, 32768, 65536, 131072),
     [int]$Runs = 3,
-    [int]$MaxTokens = 500,
-    [string]$OutputPath
+    [int]$OutputTokens = 2048,
+    [string]$OutputPath = ''
 )
 
 $ErrorActionPreference = 'Stop'
-. (Join-Path (Split-Path -Parent $PSScriptRoot) 'scripts\common.ps1')
+. (Join-Path $PSScriptRoot '..\scripts\common.ps1')
+Import-Module (Join-Path $PSScriptRoot 'Parse-LlamaBenchyResults.psm1') -Force
 
-if ($Runs -ne 3) { throw 'Runs must be exactly 3 for the publishable benchmark contract.' }
-if ($MaxTokens -ne 500) { throw 'MaxTokens must be exactly 500; the benchmark rejects shorter or partial completions.' }
-
-$baseUrl = if ([string]::IsNullOrWhiteSpace($env:QWEN_BASE_URL)) { 'http://127.0.0.1:8080/v1' } else { $env:QWEN_BASE_URL.TrimEnd('/') }
-try { $baseUri = [Uri]$baseUrl } catch { throw 'QWEN_BASE_URL must be a valid URI.' }
-if ($baseUri.Scheme -ne 'http' -or $baseUri.Host -ne '127.0.0.1' -or $baseUri.UserInfo -or $baseUri.Query -or $baseUri.Fragment) {
-    throw 'QWEN_BASE_URL must be an http loopback URL without credentials, query, or fragment.'
-}
-if (@($Contexts).Count -eq 0 -or @($Contexts | Where-Object { $_ -lt 1 -or $_ -gt 160000 }).Count -gt 0) { throw 'Contexts must be unique positive values no greater than 160000 so the 500-token completion and wrapper fit the 163840-token slot.' }
+if (@($Contexts).Count -eq 0) { throw 'Contexts must not be empty.' }
 if (@($Contexts | Sort-Object -Unique).Count -ne @($Contexts).Count) { throw 'Contexts must not contain duplicates.' }
-$requiredContexts = @(4096, 8192, 16384, 32768, 65536, 131072, 160000)
-$fullLadderRequested = (@($Contexts).Count -eq $requiredContexts.Count -and (@($Contexts) -join ',') -eq ($requiredContexts -join ','))
-$cfg = Get-Content (Join-Path (Split-Path -Parent $PSScriptRoot) 'config\profile.example.json') -Raw | ConvertFrom-Json
-$api = Get-RecipeKey $cfg
-$model = if ([string]::IsNullOrWhiteSpace($env:QWEN_MODEL_ID)) { 'qwen3.8-27b' } else { $env:QWEN_MODEL_ID }
-if ($model -match '[\\/:]') { throw 'QWEN_MODEL_ID must be an identifier, not a filesystem path.' }
-if ([string]::IsNullOrWhiteSpace($OutputPath)) { $OutputPath = Join-Path $env:TEMP ('qwen38-27b-160k-500-{0}.json' -f (Get-Date -Format 'yyyyMMdd-HHmmss')) }
+$Contexts = @($Contexts | Sort-Object)
+foreach ($c in $Contexts) { if ($c -lt 1) { throw "Context $c is not a positive token count." } }
+if ($Runs -lt 1 -or $Runs -gt 10) { throw 'Runs must be between 1 and 10.' }
+if ($OutputTokens -lt 16) { throw 'OutputTokens must be at least 16.' }
+
+$loaded = Read-RecipeConfig
+$profile = $loaded.Data
+$bindHost = [string](Get-RecipeProperty $profile 'host' '127.0.0.1')
+Assert-RecipeLoopback -BindHost $bindHost
+$port = [int](Get-RecipeProperty $profile 'port' 8080)
+Assert-RecipePort -Port $port
+$modelId = [string](Get-RecipeProperty $profile 'modelId' 'qwen3.8-27b')
+$context = [int](Get-RecipeProperty $profile 'context' 163840)
+foreach ($c in $Contexts) {
+    if ($c + $OutputTokens -gt $context) {
+        throw "Rung $c plus $OutputTokens output tokens exceeds the $context-token context."
+    }
+}
+
+$repoRoot = Get-RecipeRoot
+if ([string]::IsNullOrWhiteSpace($OutputPath)) {
+    $OutputPath = Join-Path $repoRoot ("results\qwen3.8-27b-rtx4090-llama-cpp-mtp4-{0}x{1}.json" -f $Runs, $OutputTokens)
+}
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $OutputPath) | Out-Null
 
-function Get-GpuMemory {
-    try {
-        $line = & nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader,nounits 2>$null | Select-Object -First 1
-        if ([string]::IsNullOrWhiteSpace($line)) { return $null }
-        $parts = @($line -split ',')
-        if ($parts.Count -lt 3) { return $null }
-        $used = [int]$parts[1].Trim()
-        $total = [int]$parts[2].Trim()
-        return [ordered]@{ name = $parts[0].Trim(); usedMiB = $used; totalMiB = $total; freeMiB = $total - $used }
-    } catch { return $null }
+$serverBase = "http://${bindHost}:${port}"
+$apiBase = "$serverBase/v1"
+$key = Get-RecipeKey -Config $profile
+$headers = Get-RecipeHeaders -Key $key
+try {
+    $health = Invoke-RestMethod -Uri "$serverBase/health" -Headers $headers -TimeoutSec 15 -ErrorAction Stop
+    if ([string]$health.status -ne 'ok') { throw 'health status was not ok' }
+} catch {
+    throw "llama.cpp server is not healthy at $serverBase. Run .\scripts\start.ps1 first."
+}
+$models = Invoke-RestMethod -Uri "$apiBase/models" -Headers $headers -TimeoutSec 15 -ErrorAction Stop
+$ids = @($models.data | ForEach-Object { [string]$_.id })
+if ($ids -notcontains $modelId) { throw "Model '$modelId' is not advertised ($($ids -join ', '))." }
+
+$runtimeTag = 'unknown'
+try {
+    $manifest = Get-Content -LiteralPath (Get-RecipeRuntimeManifestPath $profile) -Raw | ConvertFrom-Json
+    if (-not [string]::IsNullOrWhiteSpace([string]$manifest.tag)) { $runtimeTag = [string]$manifest.tag }
+} catch { }
+
+$uvx = Get-Command uvx -ErrorAction SilentlyContinue
+if ($null -eq $uvx) { throw 'uvx not found. Run .\benchmarks\install-llama-benchy.ps1 first.' }
+
+$uvArgs = @(
+    '--from', 'llama-benchy==0.4.0', 'llama-benchy',
+    '--base-url', $apiBase,
+    '--api-key', $key.Value,
+    '--model', $modelId,
+    '--tokenizer', 'Qwen/Qwen3.8-27B',
+    '--pp'
+)
+$uvArgs += @($Contexts | ForEach-Object { [string]$_ })
+$uvArgs += @(
+    '--tg', [string]$OutputTokens,
+    '--depth', '0',
+    '--runs', [string]$Runs,
+    '--exact-tg',
+    '--no-cache',
+    '--extra-body', 'temperature=0',
+    '--extra-body', 'return_token_ids=false',
+    '--save-result', $OutputPath,
+    '--format', 'json'
+)
+
+$gpuBefore = Get-RecipeGpuInfo
+$progressLog = Join-Path $env:TEMP "llama-benchy-progress-$([Guid]::NewGuid().ToString('N')).txt"
+Write-Host "Server: healthy at $apiBase (model '$modelId', context $context)"
+Write-Host "Ladder: $([string]::Join(', ', @($Contexts | ForEach-Object { [string]$_ }))) x $Runs runs x $OutputTokens output tokens"
+Write-Host 'Running llama-benchy; the server is never restarted by this script...'
+
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+try {
+    & $uvx.Source @uvArgs 2>&1 | Tee-Object -FilePath $progressLog
+    $benchCode = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $prevEap
+}
+if ($benchCode -ne 0) { throw "llama-benchy exited with code $benchCode. Progress: $progressLog" }
+$gpuAfter = Get-RecipeGpuInfo
+
+$doc = Read-LlamaBenchyJson -Path $OutputPath
+$rungs = @(Get-LlamaBenchyRungs -Document $doc)
+if ($rungs.Count -ne $Contexts.Count) { throw "Receipt has $($rungs.Count) measured rungs; expected $($Contexts.Count)." }
+for ($i = 0; $i -lt $Contexts.Count; $i++) {
+    $rung = $rungs[$i]
+    if ([Math]::Abs([int]$rung.promptTokens - $Contexts[$i]) -gt 512) { throw "Receipt rung $($rung.promptTokens) is not near requested $($Contexts[$i])." }
+    if ([int]$rung.runsMeasured -ne $Runs) { throw "Receipt rung $($rung.promptTokens) has $($rung.runsMeasured) runs; expected $Runs." }
+    if ([double]$rung.prefillTpsMean -le 0 -or [double]$rung.decodeTpsMean -le 0) { throw "Receipt rung $($rung.promptTokens) has non-positive throughput." }
 }
 
-function New-Prompt([int]$TargetTokens) {
-    # Keep the prompt deterministic and deliberately ask for a non-terminating
-    # 500-token continuation. ignore_eos below is a second guard against a
-    # natural EOS being mistaken for a valid throughput point.
-    $repeatCount = [Math]::Max(1, $TargetTokens - 24)
-    $filler = ((' context' * $repeatCount) -join '')
-    return "$filler`nOutput exactly 500 tokens consisting only of the word x separated by spaces. Do not stop early and do not add a conclusion."
-}
+$mdPath = [IO.Path]::ChangeExtension($OutputPath, '.md')
+$lines = [System.Collections.Generic.List[string]]::new()
+$lines.Add('# Qwen3.8-27B - RTX 4090 / RTX 3090 - llama.cpp -- llama-benchy ladder')
+$lines.Add('')
+$lines.Add([string]::Format('- llama-benchy {0} ({1}), latency {2} ms', $doc.version, $doc.timestamp, [math]::Round([double]$doc.latency_ms, 1)))
+$lines.Add([string]::Format('- Model: `{0}` on llama.cpp `{1}` (context {2}, q4_0 KV, embedded MTP4, GPU vision)', $modelId, $runtimeTag, $context))
+$lines.Add([string]::Format('- Workload: unique real book text, `--no-cache`, {0} runs x {1} exact output tokens, temperature 0, single stream, per context: {2}', $Runs, $OutputTokens, ($Contexts -join ', ')))
+if ($null -ne $gpuBefore) { $lines.Add([string]::Format('- GPU: {0} ({1} MiB total; before {2} MiB used, after {3} MiB used)', $gpuBefore.name, $gpuBefore.totalMiB, $gpuBefore.usedMiB, $gpuAfter.usedMiB)) }
+$lines.Add('')
+$lines.Add((Convert-RungsToMarkdown -Rungs $rungs -Title 'Results'))
+$lines.Add('')
+$lines.Add('Raw per-run distribution: [' + [IO.Path]::GetFileName($OutputPath) + '](' + [IO.Path]::GetFileName($OutputPath) + ')')
+[IO.File]::WriteAllText($mdPath, ($lines -join [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
 
-function Invoke-Decode([string]$Prompt, [int]$RunNumber) {
-    $body = [ordered]@{
-        model = $model
-        messages = @(@{ role = 'user'; content = $Prompt })
-        temperature = 0.0
-        top_p = 1.0
-        seed = 20260814
-        max_tokens = 500
-        ignore_eos = $true
-    } | ConvertTo-Json -Depth 10 -Compress
-    $sw = [Diagnostics.Stopwatch]::StartNew()
-    try {
-        $response = Invoke-RestMethod -Uri "$baseUrl/chat/completions" -Method Post -Headers @{ Authorization = "Bearer $($api.Value)"; 'Content-Type' = 'application/json' } -Body $body -TimeoutSec 1800 -ErrorAction Stop
-        $sw.Stop()
-        if ($null -eq $response.usage -or $null -eq $response.usage.prompt_tokens -or $null -eq $response.usage.completion_tokens -or $null -eq $response.timings -or $null -eq $response.timings.predicted_per_second) {
-            return [ordered]@{ run = $RunNumber; ok = $false; wallSeconds = [Math]::Round($sw.Elapsed.TotalSeconds, 3); errorCode = 'response_schema_invalid' }
-        }
-        $completionTokens = [int]$response.usage.completion_tokens
-        $decodeTokensPerSecond = [double]$response.timings.predicted_per_second
-        if ($completionTokens -ne 500) {
-            return [ordered]@{ run = $RunNumber; ok = $false; wallSeconds = [Math]::Round($sw.Elapsed.TotalSeconds, 3); promptTokens = [int]$response.usage.prompt_tokens; completionTokens = $completionTokens; decodeTokensPerSecond = $decodeTokensPerSecond; errorCode = 'completion_not_500' }
-        }
-        return [ordered]@{ run = $RunNumber; ok = $true; wallSeconds = [Math]::Round($sw.Elapsed.TotalSeconds, 3); promptTokens = [int]$response.usage.prompt_tokens; completionTokens = $completionTokens; decodeTokensPerSecond = $decodeTokensPerSecond }
-    } catch {
-        $sw.Stop()
-        return [ordered]@{ run = $RunNumber; ok = $false; wallSeconds = [Math]::Round($sw.Elapsed.TotalSeconds, 3); errorCode = 'request_failed' }
-    }
+Write-Host ''
+Write-Host ("Rung ladder (mean of {0} run(s)):" -f $Runs)
+Write-Host ('{0,8} | {1,10} | {2,10} | {3,10}' -f 'context', 'prefill t/s', 'decode t/s', 'TTFT s')
+foreach ($r in $rungs) {
+    $ttftS = [math]::Round([double]$r.ttfrMsMean / 1000.0, 1)
+    Write-Host ('{0,8} | {1,10} | {2,10} | {3,10}' -f ([string]::Format('{0:N0}', $r.promptTokens)), ('{0:N1}' -f $r.prefillTpsMean), ('{0:N1}' -f $r.decodeTpsMean), ('{0:N1}' -f $ttftS))
 }
-
-function Get-Average([object[]]$RunResults) {
-    $valid = @($RunResults | Where-Object { $_.ok -eq $true })
-    if ($valid.Count -ne $Runs) { return $null }
-    $decode = ($valid | ForEach-Object { [double]$_.decodeTokensPerSecond } | Measure-Object -Average).Average
-    $wall = ($valid | ForEach-Object { [double]$_.wallSeconds } | Measure-Object -Average).Average
-    $prompt = ($valid | ForEach-Object { [double]$_.promptTokens } | Measure-Object -Average).Average
-    $gpuSamples = @($valid | ForEach-Object { @($_.beforeGpu, $_.afterGpu) } | Where-Object { $null -ne $_ })
-    $gpuUsed = if ($gpuSamples.Count -gt 0) { ($gpuSamples | ForEach-Object { [double]$_.usedMiB } | Measure-Object -Average).Average } else { $null }
-    $gpuPeak = if ($gpuSamples.Count -gt 0) { ($gpuSamples | ForEach-Object { [double]$_.usedMiB } | Measure-Object -Maximum).Maximum } else { $null }
-    return [ordered]@{
-        runs = $Runs
-        promptTokens = [int][Math]::Round($prompt)
-        completionTokens = 500
-        decodeTokensPerSecond = [Math]::Round($decode, 2)
-        wallSeconds = [Math]::Round($wall, 3)
-        averageSampledGpuUsedMiB = if ($null -eq $gpuUsed) { $null } else { [Math]::Round($gpuUsed, 1) }
-        peakSampledGpuUsedMiB = if ($null -eq $gpuPeak) { $null } else { [int][Math]::Round($gpuPeak) }
-    }
-}
-
-$results = [ordered]@{
-    metadata = [ordered]@{
-        startedAt = (Get-Date).ToString('o')
-        complete = $false
-        endpoint = 'loopback'
-        model = $model
-        runs = $Runs
-        requiredCompletionTokens = 500
-        temperature = 0.0
-        seed = 20260814
-        ignoreEos = $true
-        contexts = $Contexts
-        requiredContexts = $requiredContexts
-        fullLadderRequested = $fullLadderRequested
-        completedContexts = @()
-        failedContexts = @()
-    }
-    ladder = [ordered]@{}
-}
-
-function Save-Results {
-    $results | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $OutputPath -Encoding utf8
-}
-
-$hadFailure = $false
-Save-Results
-foreach ($target in $Contexts) {
-    Write-Host "Benchmarking $target prompt tokens ($Runs runs; 500 completion tokens each)..." -ForegroundColor Yellow
-    $prompt = New-Prompt $target
-    $runResults = @()
-    for ($run = 1; $run -le $Runs; $run++) {
-        $before = Get-GpuMemory
-        $result = Invoke-Decode $prompt $run
-        $after = Get-GpuMemory
-        $result['beforeGpu'] = $before
-        $result['afterGpu'] = $after
-        $runResults += ,$result
-        Write-Host ("  run {0}: ok={1}, prompt={2}, completion={3}, t/s={4}" -f $run, $result.ok, $result.promptTokens, $result.completionTokens, $result.decodeTokensPerSecond)
-    }
-    $average = Get-Average $runResults
-    $valid = $null -ne $average
-    $results.ladder["$target"] = [ordered]@{ targetTokens = $target; valid = $valid; runs = $runResults; average = $average }
-    if ($valid) { $results.metadata.completedContexts += $target }
-    else { $results.metadata.failedContexts += $target; $hadFailure = $true }
-    Save-Results
-    if ($valid) { Write-Host ("  average: {0} tok/s over {1} complete runs" -f $average.decodeTokensPerSecond, $Runs) -ForegroundColor Green }
-    else { Write-Host '  INVALID: every run must return exactly 500 completion tokens.' -ForegroundColor Red }
-}
-$results.metadata.finishedAt = (Get-Date).ToString('o')
-$results.metadata.finalGpu = Get-GpuMemory
-$results.metadata.complete = (-not $hadFailure -and $fullLadderRequested -and $Runs -eq 3)
-Save-Results
-Write-Host "Saved $OutputPath" -ForegroundColor Green
-if ($hadFailure) {
-    Write-Host 'Benchmark incomplete: at least one context did not produce three 500-token runs.' -ForegroundColor Red
-    exit 1
-}
+Write-Host "Receipt: $OutputPath"
+Write-Host "Summary: $mdPath"
+Remove-Item -LiteralPath $progressLog -Force -ErrorAction SilentlyContinue
+exit 0
